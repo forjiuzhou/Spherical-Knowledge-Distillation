@@ -11,7 +11,7 @@ The code for implementing the SKD https://arxiv.org/abs/2010.07485
 This code is implemented with apex mixed precision training and dali. Apex and Dali can boost the training speed significantly. The details can be seen at https://github.com/NVIDIA/apex and https://github.com/NVIDIA/DALI. With both apex and dali, one can train ResNet18 on ImageNet in about 20 hours under 4 1080tis.
 
 ## Model Release
-
+To download the 73.01% accuracy ResNet18:
 ```
 from torchvision.models.resnet import resnet18
 checkpoint = 'https://github.com/forjiuzhou/Spherical-Knowledge-Distillation/releases/download/v1/resnet18_skd.pth'
