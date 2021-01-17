@@ -3,9 +3,9 @@
 The code for implementing the SKD https://arxiv.org/abs/2010.07485
 
 ## Highlight
-1. Simple and fast. SKD adds only two lines of code onto Hinton Distillation.
+1. Simple to implement and fast to train. SKD adds only two lines of code onto Hinton Distillation.
 2. High accuracy. SKD can train a ResNet18 with 73% accuracy. 
-3. Eases capacity gap problem. SKD can train a highly performance ResNet18 model (72.7% accuracy) with ResNet152 as teacher.
+3. Eases capacity gap problem. SKD can train a highly performance ResNet18 model (72.7% accuracy) with ResNet152 teacher.
 4. Very robust with temperature
 
 This code is implemented with apex mixed precision training and dali. Apex and Dali can boost the training speed significantly. The details can be seen at https://github.com/NVIDIA/apex and https://github.com/NVIDIA/DALI. With both apex and dali, one can train ResNet18 on ImageNet in about 20 hours under 4 1080tis.
