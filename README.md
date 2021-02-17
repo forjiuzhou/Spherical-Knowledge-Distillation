@@ -32,7 +32,7 @@ output = F.layer_norm(output, torch.Size((num_classes,)), None, None, 1e-7) * mu
 output_t = F.layer_norm(output_t, torch.Size((num_classes,)), None, None, 1e-7) * multiplier
 ``` 
 
-Layer normalization uses variance to normalize logits, so the appropriate multiplier can be computed by teacher's logits with torch.std(output_t, dim=1). In most cases, 'Multiplier' can be set between 2 to 3. If you use F.normalize, the appropriate multiplier should be computed by torch.norm(output_t, dim=1).
+Layer normalization uses variance to normalize logits, so the appropriate multiplier can be computed by teacher's logits with torch.std(output_t, dim=1). In most cases, 'multiplier' can be set between 2 to 3. If you use F.normalize, the appropriate multiplier should be computed by torch.norm(output_t, dim=1).
 
 ## Training
 ```
