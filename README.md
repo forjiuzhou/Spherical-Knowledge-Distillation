@@ -25,7 +25,7 @@ dali
 apex
 
 ## Minimal Codes
-The configuration of apex and dali could be very messy. To run SKD, you can simply add two lines of code into a Hinton KD implementation, just after the model forwarding.
+The configuration of apex and dali could be very messy. To run SKD, you can simply add two lines of code into a Hinton KD implementation, just after the model forwarding. To be noticed, the Cross Entropy loss has to use the normalized logits as input.
 
 ```python
 output = F.layer_norm(output, torch.Size((num_classes,)), None, None, 1e-7) * multiplier
@@ -36,5 +36,5 @@ Layer normalization uses variance to normalize logits, so the appropriate multip
 
 ## Training
 ```
-python main.py -a resnet50 --lr 0.01 --distillation --LN --T=4 --epochs 100 --multiplier 2 --fp16 [imagenet-folder with train and val folders]
+python main.py -a resnet18 --lr 0.01 --distillation --T=4 --epochs 100 --multiplier 2 --fp16 [imagenet-folder with train and val folders]
 ```
