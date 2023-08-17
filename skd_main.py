@@ -5,7 +5,6 @@ import time
 import math
 
 import torch
-from torch.autograd import Variable
 import torch.nn as nn
 import torch.nn.parallel
 import torch.backends.cudnn as cudnn
@@ -13,228 +12,93 @@ import torch.distributed as dist
 import torch.optim
 import torch.utils.data
 import torch.utils.data.distributed
-import torchvision.models as models
-import nvidia.dali.tfrecord as tfrec
-import torch.nn.functional as F
+
 import numpy as np
 
-from torch.utils.tensorboard import SummaryWriter
+from torch.nn.parallel import DistributedDataParallel as DDP
 
 try:
-    from nvidia.dali.plugin.pytorch import DALIClassificationIterator
-    from nvidia.dali.pipeline import Pipeline
-    import nvidia.dali.ops as ops
+    from nvidia.dali.plugin.pytorch import DALIClassificationIterator, LastBatchPolicy
+    from nvidia.dali.pipeline import pipeline_def
     import nvidia.dali.types as types
-    import nvidia.dali as dali
+    import nvidia.dali.fn as fn
 except ImportError:
     raise ImportError("Please install DALI from https://www.github.com/NVIDIA/DALI to run this example.")
+import torchvision.transforms as transforms
+import torchvision.datasets as datasets
+import torchvision.models as models
 
-model_names = sorted(name for name in models.__dict__
+def fast_collate(batch, memory_format):
+    """Based on fast_collate from the APEX example
+       https://github.com/NVIDIA/apex/blob/5b5d41034b506591a316c308c3d2cd14d5187e23/examples/imagenet/main_amp.py#L265
+    """
+    imgs = [img[0] for img in batch]
+    targets = torch.tensor([target[1] for target in batch], dtype=torch.int64)
+    w = imgs[0].size[0]
+    h = imgs[0].size[1]
+    tensor = torch.zeros( (len(imgs), 3, h, w), dtype=torch.uint8).contiguous(memory_format=memory_format)
+    for i, img in enumerate(imgs):
+        nump_array = np.asarray(img, dtype=np.uint8)
+        if(nump_array.ndim < 3):
+            nump_array = np.expand_dims(nump_array, axis=-1)
+        nump_array = np.rollaxis(nump_array, 2)
+        tensor[i] += torch.from_numpy(nump_array)
+    return tensor, targets
+
+def parse():
+    model_names = sorted(name for name in models.__dict__
                      if name.islower() and not name.startswith("__")
                      and callable(models.__dict__[name]))
 
-parser = argparse.ArgumentParser(description='PyTorch ImageNet Training')
-parser.add_argument('data', metavar='DIR', nargs='*',
-                    help='path(s) to dataset (if one path is provided, it is assumed\n' +
-                    'to have subdirectories named "train" and "val"; alternatively,\n' +
-                    'train and val paths can be specified directly by providing both paths as arguments)')
-parser.add_argument('--arch', '-a', metavar='ARCH', default='resnet18',
-                    choices=model_names,
-                    help='model architecture: ' +
-                    ' | '.join(model_names) +
-                    ' (default: resnet18)')
-parser.add_argument('-j', '--workers', default=4, type=int, metavar='N',
-                    help='number of data loading workers (default: 4)')
-parser.add_argument('--epochs', default=100, type=int, metavar='N',
-                    help='number of total epochs to run')
-parser.add_argument('--start-epoch', default=0, type=int, metavar='N',
-                    help='manual epoch number (useful on restarts)')
-parser.add_argument('-b', '--batch-size', default=256, type=int,
-                    metavar='N', help='mini-batch size (default: 256)')
-parser.add_argument('--lr', '--learning-rate', default=0.1, type=float,
-                    metavar='LR', help='initial learning rate')
-parser.add_argument('--momentum', default=0.9, type=float, metavar='M',
-                    help='momentum')
-parser.add_argument('--weight-decay', '--wd', default=1e-4, type=float,
-                    metavar='W', help='weight decay (default: 1e-4)')
-parser.add_argument('--print-freq', '-p', default=10, type=int,
-                    metavar='N', help='print frequency (default: 10)')
-parser.add_argument('--resume', default='', type=str, metavar='PATH',
-                    help='path to latest checkpoint (default: none)')
-parser.add_argument('-e', '--evaluate', dest='evaluate', action='store_true',
-                    help='evaluate model on validation set')
-parser.add_argument('--pretrained', dest='pretrained', action='store_true',
-                    help='use pre-trained model')
-parser.add_argument('--fp16', action='store_true',
-                    help='Run model fp16 mode.')
-parser.add_argument('--dali_cpu', action='store_true',
-                    help='Runs CPU based version of DALI pipeline.')
-parser.add_argument('--static-loss-scale', type=float, default=1,
-                    help='Static loss scale, positive power of 2 values can improve fp16 convergence.')
-parser.add_argument('--dynamic-loss-scale', action='store_true',
-                    help='Use dynamic loss scaling.  If supplied, this argument supersedes ' +
-                    '--static-loss-scale.')
-parser.add_argument('--prof', dest='prof', action='store_true',
-                    help='Only run 10 iterations for profiling.')
-parser.add_argument('-t', '--test', action='store_true',
-                    help='Launch test mode with preset arguments')
+    parser = argparse.ArgumentParser(description='PyTorch ImageNet Training')
+    parser.add_argument('data', metavar='DIR', nargs='*',
+                        help='path(s) to dataset (if one path is provided, it is assumed\n' +
+                       'to have subdirectories named "train" and "val"; alternatively,\n' +
+                       'train and val paths can be specified directly by providing both paths as arguments)')
+    parser.add_argument('--arch', '-a', metavar='ARCH', default='resnet18',
+                        choices=model_names,
+                        help='model architecture: ' +
+                        ' | '.join(model_names) +
+                        ' (default: resnet18)')
+    parser.add_argument('-j', '--workers', default=4, type=int, metavar='N',
+                        help='number of data loading workers (default: 4)')
+    parser.add_argument('--epochs', default=90, type=int, metavar='N',
+                        help='number of total epochs to run')
+    parser.add_argument('--start-epoch', default=0, type=int, metavar='N',
+                        help='manual epoch number (useful on restarts)')
+    parser.add_argument('-b', '--batch-size', default=256, type=int,
+                        metavar='N', help='mini-batch size per process (default: 256)')
+    parser.add_argument('--lr', '--learning-rate', default=0.1, type=float,
+                        metavar='LR', help='Initial learning rate.  Will be scaled by <global batch size>/256: args.lr = args.lr*float(args.batch_size*args.world_size)/256.  A warmup schedule will also be applied over the first 5 epochs.')
+    parser.add_argument('--momentum', default=0.9, type=float, metavar='M',
+                        help='momentum')
+    parser.add_argument('--weight-decay', '--wd', default=1e-4, type=float,
+                        metavar='W', help='weight decay (default: 1e-4)')
+    parser.add_argument('--print-freq', '-p', default=10, type=int,
+                        metavar='N', help='print frequency (default: 10)')
+    parser.add_argument('--resume', default='', type=str, metavar='PATH',
+                        help='path to latest checkpoint (default: none)')
+    parser.add_argument('-e', '--evaluate', dest='evaluate', action='store_true',
+                        help='evaluate model on validation set')
+    parser.add_argument('--pretrained', dest='pretrained', action='store_true',
+                        help='use pre-trained model')
 
-parser.add_argument("--local_rank", default=0, type=int)
+    parser.add_argument('--dali_cpu', action='store_true',
+                        help='Runs CPU based version of DALI pipeline.')
+    parser.add_argument('--disable_dali', default=False, action='store_true',
+                        help='Disable DALI data loader and use native PyTorch one instead.')
+    parser.add_argument('--prof', default=-1, type=int,
+                        help='Only run 10 iterations for profiling.')
+    parser.add_argument('--deterministic', action='store_true')
 
-# parser.add_argument("--model_dir", type=str)
-parser.add_argument('--T', type=float)
-parser.add_argument('--alpha', type=float)
-parser.add_argument('--multiplier', type=float)
-parser.add_argument('--distillation', action='store_true')
-parser.add_argument('--SKD', action='store_true')
-parser.add_argument('--log_str', type=str)
-
-cudnn.benchmark = True
-
-
-class HybridTrainPipe(Pipeline):
-    def __init__(self, batch_size, num_threads, device_id, data_dir, crop, dali_cpu=False):
-        super(HybridTrainPipe, self).__init__(batch_size, num_threads, device_id, seed=12 + device_id)
-        self.input = ops.FileReader(file_root=data_dir, shard_id=args.local_rank, num_shards=args.world_size, random_shuffle=True)
-        # index_path = []
-        # for path in os.listdir("/home/yz979/code/imagenet/ImageNet-to-TFrecord/idx_files"):
-        #     index_path.append(os.path.join("/home/yz979/code/imagenet/ImageNet-to-TFrecord/idx_files", path))
-        # index_path = sorted(index_path)
-        # self.input = ops.TFRecordReader(path=data_dir, index_path=index_path, shard_id=args.local_rank,
-        #                                 num_shards=args.world_size, random_shuffle=True,
-        #                                 features={
-        #                                             'image/height': tfrec.FixedLenFeature([1], tfrec.int64,  -1),
-        #                                             'image/width': tfrec.FixedLenFeature([1], tfrec.int64,  -1),
-        #                                             'image/colorspace': tfrec.FixedLenFeature([ ], tfrec.string, ''),
-        #                                             'image/channels': tfrec.FixedLenFeature([], tfrec.int64,  -1),
-        #                                             'image/class/label': tfrec.FixedLenFeature([1], tfrec.int64,  -1),
-        #                                             'image/class/synset': tfrec.FixedLenFeature([ ], tfrec.string, ''),
-        #                                             # 'image/class/text': tfrec.FixedLenFeature([ ], tfrec.string, ''),
-        #                                             # 'image/object/bbox/xmin': tfrec.VarLenFeature(tfrec.float32, 0.0),
-        #                                             # 'image/object/bbox/xmax': tfrec.VarLenFeature(tfrec.float32, 0.0),
-        #                                             # 'image/object/bbox/ymin': tfrec.VarLenFeature(tfrec.float32, 0.0),
-        #                                             # 'image/object/bbox/ymax': tfrec.VarLenFeature(tfrec.float32, 0.0),
-        #                                             # 'image/object/bbox/label': tfrec.FixedLenFeature([1], tfrec.int64,-1),
-        #                                             'image/format': tfrec.FixedLenFeature((), tfrec.string, ""),
-        #                                             'image/filename': tfrec.FixedLenFeature((), tfrec.string, ""),
-        #                                             'image/encoded': tfrec.FixedLenFeature((), tfrec.string, "")
-        #                                         })
-
-        #let user decide which pipeline works him bets for RN version he runs
-        dali_device = 'cpu' if dali_cpu else 'gpu'
-        decoder_device = 'cpu' if dali_cpu else 'mixed'
-        # This padding sets the size of the internal nvJPEG buffers to be able to handle all images from full-sized ImageNet
-        # without additional reallocations
-        device_memory_padding = 211025920 if decoder_device == 'mixed' else 0
-        host_memory_padding = 140544512 if decoder_device == 'mixed' else 0
-        self.decode = ops.ImageDecoderRandomCrop(device=decoder_device, output_type=types.RGB,
-                                                 device_memory_padding=device_memory_padding,
-                                                 host_memory_padding=host_memory_padding,
-                                                 random_aspect_ratio=[0.8, 1.25],
-                                                 random_area=[0.1, 1.0],
-                                                 num_attempts=100)
-        self.res = ops.Resize(device=dali_device, resize_x=crop, resize_y=crop, interp_type=types.INTERP_TRIANGULAR)
-        self.cmnp = ops.CropMirrorNormalize(device="gpu",
-                                            output_dtype=types.FLOAT,
-                                            output_layout=types.NCHW,
-                                            crop=(crop, crop),
-                                            image_type=types.RGB,
-                                            mean=[0.485 * 255,0.456 * 255,0.406 * 255],
-                                            std=[0.229 * 255,0.224 * 255,0.225 * 255])
-        self.coin = ops.CoinFlip(probability=0.5)
-        print('DALI "{0}" variant'.format(dali_device))
-
-    def define_graph(self):
-        rng = self.coin()
-        self.jpegs, self.labels = self.input()
-
-        # inputs = self.input()
-        # self.jpegs = inputs["image/encoded"]
-        # self.labels = inputs["image/class/label"]
-
-        images = self.decode(self.jpegs)
-        images = self.res(images)
-        output = self.cmnp(images.gpu(), mirror=rng)
-        return [output, self.labels]
-
-
-class HybridValPipe(Pipeline):
-    def __init__(self, batch_size, num_threads, device_id, data_dir, crop, size):
-        super(HybridValPipe, self).__init__(batch_size, num_threads, device_id, seed=12 + device_id)
-        self.input = ops.FileReader(file_root=data_dir, shard_id=args.local_rank, num_shards=args.world_size, random_shuffle=False)
-        # index_path = []
-        # for path in os.listdir("/home/yz979/code/imagenet/ImageNet-to-TFrecord/val_idx_files"):
-        #     index_path.append(os.path.join("/home/yz979/code/imagenet/ImageNet-to-TFrecord/val_idx_files", path))
-        # index_path = sorted(index_path)
-        # self.input = ops.TFRecordReader(path=data_dir, index_path=index_path, shard_id=args.local_rank,
-        #                                 num_shards=args.world_size, random_shuffle=True,
-        #                                 features={
-        #                                     'image/height': tfrec.FixedLenFeature([1], tfrec.int64, -1),
-        #                                     'image/width': tfrec.FixedLenFeature([1], tfrec.int64, -1),
-        #                                     'image/colorspace': tfrec.FixedLenFeature([], tfrec.string, ''),
-        #                                     'image/channels': tfrec.FixedLenFeature([], tfrec.int64, -1),
-        #                                     'image/class/label': tfrec.FixedLenFeature([1], tfrec.int64, -1),
-        #                                     'image/class/synset': tfrec.FixedLenFeature([], tfrec.string, ''),
-        #                                     'image/format': tfrec.FixedLenFeature((), tfrec.string, ""),
-        #                                     'image/filename': tfrec.FixedLenFeature((), tfrec.string, ""),
-        #                                     'image/encoded': tfrec.FixedLenFeature((), tfrec.string, "")
-        #                                 })
-        self.decode = ops.ImageDecoder(device="mixed", output_type=types.RGB)
-        self.res = ops.Resize(device="gpu", resize_shorter=size, interp_type=types.INTERP_TRIANGULAR)
-        self.cmnp = ops.CropMirrorNormalize(device="gpu",
-                                            output_dtype=types.FLOAT,
-                                            output_layout=types.NCHW,
-                                            crop=(crop, crop),
-                                            image_type=types.RGB,
-                                            mean=[0.485 * 255,0.456 * 255,0.406 * 255],
-                                            std=[0.229 * 255,0.224 * 255,0.225 * 255])
-
-    def define_graph(self):
-        self.jpegs, self.labels = self.input()
-
-        # inputs = self.input()
-        # self.jpegs = inputs["image/encoded"]
-        # self.labels = inputs["image/class/label"]
-
-        images = self.decode(self.jpegs)
-        images = self.res(images)
-        output = self.cmnp(images)
-        return [output, self.labels]
-
-
-best_prec1 = 0
-best_prec5 = 0
-args = parser.parse_args()
-if args.local_rank == 0:
-    writer = SummaryWriter(log_dir=args.log_str)
-
-# test mode, use default args for sanity test
-if args.test:
-    args.fp16 = False
-    args.epochs = 1
-    args.start_epoch = 0
-    args.arch = 'resnet50'
-    args.batch_size = 64
-    args.data = []
-    args.prof = True
-    args.data.append('/data/imagenet/train-jpeg/')
-    args.data.append('/data/imagenet/val-jpeg/')
-
-if not len(args.data):
-    raise Exception("error: too few arguments")
-
-args.distributed = False
-if 'WORLD_SIZE' in os.environ:
-    args.distributed = int(os.environ['WORLD_SIZE']) >= 1
-
-# make apex optional
-if args.fp16 or args.distributed:
-    try:
-        from apex.parallel import DistributedDataParallel as DDP
-        from apex.fp16_utils import *
-        from apex import *
-    except ImportError:
-        raise ImportError("Please install apex from https://www.github.com/nvidia/apex to run this example.")
+    parser.add_argument('--fp16-mode', default=False, action='store_true',
+                        help='Enable half precision mode.')
+    parser.add_argument('--loss-scale', type=float, default=1)
+    parser.add_argument('--channels-last', type=bool, default=False)
+    parser.add_argument('-t', '--test', action='store_true',
+                        help='Launch test mode with preset arguments')
+    args = parser.parse_args()
+    return args
 
 # item() is a recent addition, so this helps with backward compatibility.
 def to_python_float(t):
@@ -244,30 +108,104 @@ def to_python_float(t):
         return t[0]
 
 
-# dali.backend.SetHostBufferShrinkThreshold(1)
+@pipeline_def
+def create_dali_pipeline(data_dir, crop, size, shard_id, num_shards, dali_cpu=False, is_training=True):
+    images, labels = fn.readers.file(file_root=data_dir,
+                                     shard_id=shard_id,
+                                     num_shards=num_shards,
+                                     random_shuffle=is_training,
+                                     pad_last_batch=True,
+                                     name="Reader")
+    dali_device = 'cpu' if dali_cpu else 'gpu'
+    decoder_device = 'cpu' if dali_cpu else 'mixed'
+    # ask nvJPEG to preallocate memory for the biggest sample in ImageNet for CPU and GPU to avoid reallocations in runtime
+    device_memory_padding = 211025920 if decoder_device == 'mixed' else 0
+    host_memory_padding = 140544512 if decoder_device == 'mixed' else 0
+    # ask HW NVJPEG to allocate memory ahead for the biggest image in the data set to avoid reallocations in runtime
+    preallocate_width_hint = 5980 if decoder_device == 'mixed' else 0
+    preallocate_height_hint = 6430 if decoder_device == 'mixed' else 0
+    if is_training:
+        images = fn.decoders.image_random_crop(images,
+                                               device=decoder_device, output_type=types.RGB,
+                                               device_memory_padding=device_memory_padding,
+                                               host_memory_padding=host_memory_padding,
+                                               preallocate_width_hint=preallocate_width_hint,
+                                               preallocate_height_hint=preallocate_height_hint,
+                                               random_aspect_ratio=[0.8, 1.25],
+                                               random_area=[0.1, 1.0],
+                                               num_attempts=100)
+        images = fn.resize(images,
+                           device=dali_device,
+                           resize_x=crop,
+                           resize_y=crop,
+                           interp_type=types.INTERP_TRIANGULAR)
+        mirror = fn.random.coin_flip(probability=0.5)
+    else:
+        images = fn.decoders.image(images,
+                                   device=decoder_device,
+                                   output_type=types.RGB)
+        images = fn.resize(images,
+                           device=dali_device,
+                           size=size,
+                           mode="not_smaller",
+                           interp_type=types.INTERP_TRIANGULAR)
+        mirror = False
+
+    images = fn.crop_mirror_normalize(images.gpu(),
+                                      dtype=types.FLOAT,
+                                      output_layout="CHW",
+                                      crop=(crop, crop),
+                                      mean=[0.485 * 255,0.456 * 255,0.406 * 255],
+                                      std=[0.229 * 255,0.224 * 255,0.225 * 255],
+                                      mirror=mirror)
+    labels = labels.gpu()
+    return images, labels
 
 
 def main():
-    global best_prec1, args, best_prec5
-    print("         A")
+    global best_prec1, args
+    best_prec1 = 0
+    args = parse()
+
+    if not len(args.data):
+        raise Exception("error: No data set provided")
+
+    if args.test:
+        print("Test mode - only 10 iterations")
+
+    args.distributed = False
+    if 'WORLD_SIZE' in os.environ:
+        args.distributed = int(os.environ['WORLD_SIZE']) > 1
+    if 'LOCAL_RANK' in os.environ:
+        args.local_rank = int(os.environ['LOCAL_RANK'])
+    else:
+        args.local_rank = 0
+
+    print("fp16_mode = {}".format(args.fp16_mode))
+    print("loss_scale = {}".format(args.loss_scale), type(args.loss_scale))
+
+    print("\nCUDNN VERSION: {}\n".format(torch.backends.cudnn.version()))
+
+    cudnn.benchmark = True
+    best_prec1 = 0
+    if args.deterministic:
+        cudnn.benchmark = False
+        cudnn.deterministic = True
+        torch.manual_seed(args.local_rank)
+        torch.set_printoptions(precision=10)
+
     args.gpu = 0
     args.world_size = 1
 
     if args.distributed:
-        args.gpu = args.local_rank % torch.cuda.device_count()
+        args.gpu = args.local_rank
         torch.cuda.set_device(args.gpu)
         torch.distributed.init_process_group(backend='nccl',
                                              init_method='env://')
         args.world_size = torch.distributed.get_world_size()
 
     args.total_batch_size = args.world_size * args.batch_size
-
-    if args.fp16:
-        assert torch.backends.cudnn.enabled, "fp16 mode requires cudnn backend to be enabled."
-
-    if args.static_loss_scale != 1.0:
-        if not args.fp16:
-            print("Warning:  if --fp16 is not used, static_loss_scale will be ignored.")
+    assert torch.backends.cudnn.enabled, "Amp requires cudnn backend to be enabled."
 
     # create model
     if args.pretrained:
@@ -276,258 +214,215 @@ def main():
     else:
         print("=> creating model '{}'".format(args.arch))
         model = models.__dict__[args.arch]()
-    teacher = None
-    if args.distillation:
-        teacher = models.resnet50(pretrained=True).cuda()
-        teacher.eval()
 
-    model = model.cuda()
+    if hasattr(torch, 'channels_last') and  hasattr(torch, 'contiguous_format'):
+        if args.channels_last:
+            memory_format = torch.channels_last
+        else:
+            memory_format = torch.contiguous_format
+        model = model.cuda().to(memory_format=memory_format)
+    else:
+        model = model.cuda()
 
-    if args.distributed:
-        # shared param/delay all reduce turns off bucketing in DDP, for lower latency runs this can improve perf
-        # for the older version of APEX please use shared_param, for newer one it is delay_allreduce
-        model = DDP(model, delay_allreduce=True)
-        if args.distillation:
-            teacher = DDP(teacher, delay_allreduce=True)
-    criterion = nn.CrossEntropyLoss().cuda()
-
+    # Scale learning rate based on global batch size
+    args.lr = args.lr*float(args.batch_size*args.world_size)/256.
     optimizer = torch.optim.SGD(model.parameters(), args.lr,
                                 momentum=args.momentum,
                                 weight_decay=args.weight_decay)
-    if args.fp16:
-        model, optimizer = amp.initialize(model, optimizer, opt_level="O1")
-        if args.distillation:
-            teacher = amp.initialize(teacher, opt_level="O1")
-    print("         C")
-    # optionally resume from a checkpoint
+
+    if args.distributed:
+        s = torch.cuda.Stream()
+        s.wait_stream(torch.cuda.current_stream())
+        with torch.cuda.stream(s):
+            model = DDP(model, device_ids=[args.local_rank], output_device=args.local_rank)
+        torch.cuda.current_stream().wait_stream(s)
+
+    # define loss function (criterion) and optimizer
+    criterion = nn.CrossEntropyLoss().cuda()
+
+    # Optionally resume from a checkpoint
     if args.resume:
-        if os.path.isfile(args.resume):
-            print("=> loading checkpoint '{}'".format(args.resume))
-            checkpoint = torch.load(args.resume, map_location=lambda storage, loc: storage.cuda(args.gpu))
-            args.start_epoch = checkpoint['epoch']
-            best_prec1 = checkpoint['best_prec1']
-            model.load_state_dict(checkpoint['state_dict'])
-            optimizer.load_state_dict(checkpoint['optimizer'])
-            print("=> loaded checkpoint '{}' (epoch {})"
-                  .format(args.resume, checkpoint['epoch']))
-        else:
-            print("=> no checkpoint found at '{}'".format(args.resume))
+        # Use a local scope to avoid dangling references
+        def resume():
+            if os.path.isfile(args.resume):
+                print("=> loading checkpoint '{}'".format(args.resume))
+                checkpoint = torch.load(args.resume, map_location = lambda storage, loc: storage.cuda(args.gpu))
+                args.start_epoch = checkpoint['epoch']
+                global best_prec1
+                best_prec1 = checkpoint['best_prec1']
+                model.load_state_dict(checkpoint['state_dict'])
+                optimizer.load_state_dict(checkpoint['optimizer'])
+                print("=> loaded checkpoint '{}' (epoch {})"
+                      .format(args.resume, checkpoint['epoch']))
+            else:
+                print("=> no checkpoint found at '{}'".format(args.resume))
+        resume()
+
     # Data loading code
     if len(args.data) == 1:
-        traindir = []
-        valdir = []
-        for path in os.listdir(os.path.join(args.data[0], "train")):
-            traindir.append(os.path.join(args.data[0],"train", path))
-        traindir = sorted(traindir)
-        for path in os.listdir(os.path.join(args.data[0], "val")):
-            valdir.append(os.path.join(args.data[0], "val",path))
-        valdir = sorted(valdir)
-        print(len(valdir), len(traindir))
+        traindir = os.path.join(args.data[0], 'train')
+        valdir = os.path.join(args.data[0], 'val')
     else:
         traindir = args.data[0]
         valdir= args.data[1]
 
-    if(args.arch == "inception_v3"):
-        crop_size = 299
-        val_size = 320 # I chose this value arbitrarily, we can adjust.
+    if args.arch == "inception_v3":
+        raise RuntimeError("Currently, inception_v3 is not supported by this example.")
+        # crop_size = 299
+        # val_size = 320 # I chose this value arbitrarily, we can adjust.
     else:
         crop_size = 224
         val_size = 256
 
-    pipe = HybridTrainPipe(batch_size=args.batch_size, num_threads=args.workers, device_id=args.local_rank, data_dir=traindir, crop=crop_size, dali_cpu=args.dali_cpu)
-    pipe.build()
+    train_loader = None
+    val_loader = None
+    if not args.disable_dali:
+        train_pipe = create_dali_pipeline(batch_size=args.batch_size,
+                                          num_threads=args.workers,
+                                          device_id=args.local_rank,
+                                          seed=12 + args.local_rank,
+                                          data_dir=traindir,
+                                          crop=crop_size,
+                                          size=val_size,
+                                          dali_cpu=args.dali_cpu,
+                                          shard_id=args.local_rank,
+                                          num_shards=args.world_size,
+                                          is_training=True)
+        train_pipe.build()
+        train_loader = DALIClassificationIterator(train_pipe, reader_name="Reader",
+                                                  last_batch_policy=LastBatchPolicy.PARTIAL,
+                                                  auto_reset=True)
 
-    train_loader = DALIClassificationIterator(pipe, size=int(pipe.epoch_size()['__TFRecordReader_1'] / args.world_size))
-    pipe = HybridValPipe(batch_size=args.batch_size, num_threads=args.workers, device_id=args.local_rank, data_dir=valdir,
-                         crop=crop_size, size=val_size)
-    pipe.build()
+        val_pipe = create_dali_pipeline(batch_size=args.batch_size,
+                                        num_threads=args.workers,
+                                        device_id=args.local_rank,
+                                        seed=12 + args.local_rank,
+                                        data_dir=valdir,
+                                        crop=crop_size,
+                                        size=val_size,
+                                        dali_cpu=args.dali_cpu,
+                                        shard_id=args.local_rank,
+                                        num_shards=args.world_size,
+                                        is_training=False)
+        val_pipe.build()
+        val_loader = DALIClassificationIterator(val_pipe, reader_name="Reader",
+                                                last_batch_policy=LastBatchPolicy.PARTIAL,
+                                                auto_reset=True)
+    else:
+        train_dataset = datasets.ImageFolder(traindir,
+                                             transforms.Compose([transforms.RandomResizedCrop(crop_size),
+                                                                 transforms.RandomHorizontalFlip()]))
+        val_dataset = datasets.ImageFolder(valdir,
+                                           transforms.Compose([transforms.Resize(val_size),
+                                                               transforms.CenterCrop(crop_size)]))
 
-    val_loader = DALIClassificationIterator(pipe, size=int(pipe.epoch_size()['__TFRecordReader_5'] / args.world_size))
+        train_sampler = None
+        val_sampler = None
+        if args.distributed:
+            train_sampler = torch.utils.data.distributed.DistributedSampler(train_dataset)
+            val_sampler = torch.utils.data.distributed.DistributedSampler(val_dataset)
+
+        collate_fn = lambda b: fast_collate(b, memory_format)
+
+        train_loader = torch.utils.data.DataLoader(train_dataset,
+                                                   batch_size=args.batch_size,
+                                                   shuffle=(train_sampler is None),
+                                                   num_workers=args.workers,
+                                                   pin_memory=True,
+                                                   sampler=train_sampler,
+                                                   collate_fn=collate_fn)
+
+        val_loader = torch.utils.data.DataLoader(val_dataset,
+                                                 batch_size=args.batch_size,
+                                                 shuffle=False,
+                                                 num_workers=args.workers,
+                                                 pin_memory=True,
+                                                 sampler=val_sampler,
+                                                 collate_fn=collate_fn)
 
     if args.evaluate:
-        validate(val_loader, model, criterion, teacher)
+        validate(val_loader, model, criterion)
         return
+
+    scaler = torch.cuda.amp.GradScaler(init_scale=args.loss_scale,
+                                       growth_factor=2,
+                                       backoff_factor=0.5,
+                                       growth_interval=100,
+                                       enabled=args.fp16_mode)
     total_time = AverageMeter()
     for epoch in range(args.start_epoch, args.epochs):
-        if epoch < 30:
-            args.alpha = 0.9
-        elif epoch < 60:
-            args.alpha = 0.9
-        elif epoch < 80:
-            args.alpha = 0.5
-        elif epoch < 100:
-            args.alpha = 0.1
-        if epoch == 30 or epoch == 60 or epoch == 90:
-            save_checkpoint({
-                'epoch': epoch,
-                'arch': args.arch,
-                'state_dict': model.state_dict(),
-                'optimizer': optimizer.state_dict(),
-            }, False, filename=os.path.join(args.log_str, 'epoch_{}'.format(epoch) + '_checkpoint.pth.tar'))
         # train for one epoch
-        loss_kd = None
-        if args.distillation:
-            avg_train_time, losses, top1, top5, loss_kd, \
-                = train_kd(train_loader, model, (teacher,None), criterion, optimizer, epoch)
-        else:
-            avg_train_time, losses, top1, top5 = train(train_loader, model, criterion, optimizer, epoch)
+        avg_train_time = train(train_loader, model, criterion, scaler, optimizer, epoch)
         total_time.update(avg_train_time)
-        if args.local_rank == 0:
-            writer.add_scalar('Loss/train', losses, epoch)
-            writer.add_scalar('Accuracy/train_prec1', top1, epoch)
-            writer.add_scalar('Accuracy/train_prec5', top5, epoch)
-
-            if loss_kd:
-                writer.add_scalar('Loss/train/kd_loss', loss_kd, epoch)
-        if args.prof:
+        if args.test:
             break
+
         # evaluate on validation set
+        [prec1, prec5] = validate(val_loader, model, criterion)
 
-        with torch.no_grad():
-            prec1, prec5, losses, loss_kd = validate(val_loader, model, criterion, teacher)
-
-            if args.local_rank == 0:
-                writer.add_scalar('Loss/test', losses, epoch)
-                writer.add_scalar('Accuracy/test_prec1', prec1, epoch)
-                writer.add_scalar('Accuracy/test_prec5', prec5, epoch)
-                if loss_kd:
-                    writer.add_scalar('Loss/test/loss_kd', loss_kd, epoch)
-        torch.cuda.empty_cache()
-        # val_pipe.release_outputs()
         # remember best prec@1 and save checkpoint
         if args.local_rank == 0:
             is_best = prec1 > best_prec1
             best_prec1 = max(prec1, best_prec1)
-            best_prec5 = max(prec5, best_prec5)
             save_checkpoint({
                 'epoch': epoch + 1,
                 'arch': args.arch,
                 'state_dict': model.state_dict(),
                 'best_prec1': best_prec1,
-                'optimizer': optimizer.state_dict(),
-                'best_prec5': best_prec5,
+                'optimizer' : optimizer.state_dict(),
             }, is_best)
             if epoch == args.epochs - 1:
                 print('##Top-1 {0}\n'
                       '##Top-5 {1}\n'
-                      '##Perf  {2}'.format(prec1, prec5, args.total_batch_size / total_time.avg))
+                      '##Perf  {2}'.format(
+                      prec1,
+                      prec5,
+                      args.total_batch_size / total_time.avg))
 
-        # reset DALI iterators
-        del prec5, prec1, losses
-        train_loader.reset()
-        val_loader.reset()
+class data_prefetcher():
+    """Based on prefetcher from the APEX example
+       https://github.com/NVIDIA/apex/blob/5b5d41034b506591a316c308c3d2cd14d5187e23/examples/imagenet/main_amp.py#L265
+    """
+    def __init__(self, loader):
+        self.loader = iter(loader)
+        self.stream = torch.cuda.Stream()
+        self.mean = torch.tensor([0.485 * 255, 0.456 * 255, 0.406 * 255]).cuda().view(1,3,1,1)
+        self.std = torch.tensor([0.229 * 255, 0.224 * 255, 0.225 * 255]).cuda().view(1,3,1,1)
+        self.preload()
 
-def train_kd(train_loader, model, teacher, criterion, optimizer, epoch):
+    def preload(self):
+        try:
+            self.next_input, self.next_target = next(self.loader)
+        except StopIteration:
+            self.next_input = None
+            self.next_target = None
+            return
+        with torch.cuda.stream(self.stream):
+            self.next_input = self.next_input.cuda(non_blocking=True)
+            self.next_target = self.next_target.cuda(non_blocking=True)
+            self.next_input = self.next_input.float()
+            self.next_input = self.next_input.sub_(self.mean).div_(self.std)
+
+    def __iter__(self):
+        return self
+
+    def __next__(self):
+        """The iterator was added on top of the orignal example to align it with DALI iterator
+        """
+        torch.cuda.current_stream().wait_stream(self.stream)
+        input = self.next_input
+        target = self.next_target
+        if input is not None:
+            input.record_stream(torch.cuda.current_stream())
+        if target is not None:
+            target.record_stream(torch.cuda.current_stream())
+        self.preload()
+        if input is None:
+            raise StopIteration
+        return input, target
+
+def train(train_loader, model, criterion, scaler, optimizer, epoch):
     batch_time = AverageMeter()
-    data_time = AverageMeter()
-    losses = AverageMeter()
-    top1 = AverageMeter()
-    top5 = AverageMeter()
-    losses_kd = AverageMeter()
-    losses_softmax = AverageMeter()
-
-    # switch to train mode
-    model.train()
-    end = time.time()
-
-    for i, data in enumerate(train_loader):
-
-        input = data[0]["data"]
-        target = data[0]["label"].squeeze().cuda().long() - 1
-        train_loader_len = int(math.ceil(train_loader._size / args.batch_size))
-
-        adjust_learning_rate(optimizer, epoch, i, train_loader_len)
-
-        if args.prof:
-            if i > 10:
-                break
-        # measure data loading time
-        data_time.update(time.time() - end)
-
-        input_var = Variable(input)
-        target_var = Variable(target)
-
-        # compute output
-        output = model(input_var)
-        with torch.no_grad():
-            output_t = teacher[0](input_var)
-
-        if args.SKD:
-            # output = F.layer_norm(
-            #     output, torch.Size((1000,)), None, None, 1e-7)*args.multiplier
-            # output_t = F.layer_norm(
-            #     output_t, torch.Size((1000,)), None, None, 1e-7)*args.multiplier
-            # p = F.softmax(output_t / args.T, dim=-1)
-            # loss_kd = nn.KLDivLoss(reduction="batchmean")(F.log_softmax(output / args.T, dim=1),p
-                                                    #   ) * args.T * args.T * args.alpha
-            tea_std = torch.std(output_t, dim=-1,keepdim=True)
-            stu_std= torch.std(output, dim=-1, keepdim=True)
-            p_s = F.log_softmax(output/stu_std*tea_std/args.T, dim=1)
-            p_t = F.softmax(output_t/args.T, dim=1)
-            loss_kd = torch.sum(torch.sum(F.kl_div(p_s, p_t, reduction='none'), dim=-1) * (args.T* args.T * torch.ones(output.shape[0],1).cuda())) /output.shape[0]/ output.shape[0] * args.alpha
-            output = output/stu_std*tea_std
-
-        loss_softmax = criterion(output, target_var) * (1-args.alpha)
-
-        loss = loss_kd+loss_softmax
-        prec1, prec5 = accuracy(output.data, target, topk=(1, 5))
-
-        if args.distributed:
-            reduced_loss = reduce_tensor(loss.data)
-            reduced_loss_kd = reduce_tensor(loss_kd.data)
-            reduced_softmax = reduce_tensor(loss_softmax.data)
-            prec1 = reduce_tensor(prec1)
-            prec5 = reduce_tensor(prec5)
-
-        else:
-            reduced_loss_kd = loss_kd.data
-            reduced_softmax = loss_softmax.data
-            reduced_loss = loss.data
-
-        losses.update(to_python_float(reduced_loss), input.size(0))
-        top1.update(to_python_float(prec1), input.size(0))
-        top5.update(to_python_float(prec5), input.size(0))
-        losses_kd.update(to_python_float(reduced_loss_kd), input.size(0))
-        losses_softmax.update(to_python_float(reduced_softmax), input.size(0))
-
-        # compute gradient and do SGD step
-        optimizer.zero_grad()
-        if args.fp16:
-            with amp.scale_loss(loss, optimizer) as scaled_loss:
-                scaled_loss.backward()
-
-        else:
-            loss.backward()
-        optimizer.step()
-
-        torch.cuda.synchronize()
-        # measure elapsed time
-        batch_time.update(time.time() - end)
-
-        end = time.time()
-
-        if args.local_rank == 0 and i % args.print_freq == 0 and i > 1:
-            print('Epoch: [{0}][{1}/{2}]\t'
-                  'Time {batch_time.val:.3f} ({batch_time.avg:.3f})\t'
-                  'Speed {3:.3f} ({4:.3f})\t'
-                  'Data {data_time.val:.3f} ({data_time.avg:.3f})\t'
-                  'Loss {loss.val:.4f} ({loss.avg:.4f})\t'
-                  'Loss_softmax {loss_softmax.val:.4f} ({loss_softmax.avg:.4f})\t'
-                  'Loss_kd {loss_kd.val:.4f} ({loss_kd.avg:.4f})\t'
-                  'Prec@1 {top1.val:.3f} ({top1.avg:.3f})\t'
-                  'Prec@5 {top5.val:.3f} ({top5.avg:.3f})'.format(
-                epoch, i, train_loader_len,
-                args.total_batch_size / batch_time.val,
-                args.total_batch_size / batch_time.avg,
-                batch_time=batch_time,
-                data_time=data_time, loss=losses, loss_kd=losses_kd, loss_softmax=losses_softmax, top1=top1, top5=top5))
-        del loss, output
-    return batch_time.avg, losses.avg, top1.avg, top5.avg, losses_kd.avg
-
-
-def train(train_loader, model, criterion, optimizer, epoch):
-    batch_time = AverageMeter()
-    data_time = AverageMeter()
     losses = AverageMeter()
     top1 = AverageMeter()
     top5 = AverageMeter()
@@ -536,80 +431,104 @@ def train(train_loader, model, criterion, optimizer, epoch):
     model.train()
     end = time.time()
 
-    for i, data in enumerate(train_loader):
-        input = data[0]["data"]
-        target = data[0]["label"].squeeze().cuda().long()-1
-        train_loader_len = int(math.ceil(train_loader._size / args.batch_size))
+    if args.disable_dali:
+        data_iterator = data_prefetcher(train_loader)
+        data_iterator = iter(data_iterator)
+    else:
+        data_iterator = train_loader
+
+    for i, data in enumerate(data_iterator):
+        if args.disable_dali:
+            input, target = data
+            train_loader_len = len(train_loader)
+        else:
+            input = data[0]["data"]
+            target = data[0]["label"].squeeze(-1).long()
+            train_loader_len = int(math.ceil(data_iterator._size / args.batch_size))
+
+        if args.prof >= 0 and i == args.prof:
+            print("Profiling begun at iteration {}".format(i))
+            torch.cuda.cudart().cudaProfilerStart()
+
+        if args.prof >= 0: torch.cuda.nvtx.range_push("Body of iteration {}".format(i))
 
         adjust_learning_rate(optimizer, epoch, i, train_loader_len)
-
-        if args.prof:
+        if args.test:
             if i > 10:
                 break
-        # measure data loading time
-        data_time.update(time.time() - end)
 
-        input_var = Variable(input)
-        target_var = Variable(target)
+        with torch.cuda.amp.autocast(enabled=args.fp16_mode):
+            output = model(input)
+            loss = criterion(output, target)
 
         # compute output
-        output = model(input_var)
+        if args.prof >= 0: torch.cuda.nvtx.range_push("forward")
 
-        if args.SKD:
-            output = F.layer_norm(
-                output, torch.Size((1000,)), None, None, 1e-9) * args.multiplier
+        if args.prof >= 0: torch.cuda.nvtx.range_pop()
 
-        loss = criterion(output, target_var)
-
-        # measure accuracy and record loss
-        prec1, prec5 = accuracy(output.data, target, topk=(1, 5))
-
-        if args.distributed:
-            reduced_loss = reduce_tensor(loss.data)
-            prec1 = reduce_tensor(prec1)
-            prec5 = reduce_tensor(prec5)
-        else:
-            reduced_loss = loss.data
-
-        losses.update(to_python_float(reduced_loss), input.size(0))
-        top1.update(to_python_float(prec1), input.size(0))
-        top5.update(to_python_float(prec5), input.size(0))
         # compute gradient and do SGD step
         optimizer.zero_grad()
-        if args.fp16:
-            with amp.scale_loss(loss, optimizer) as scaled_loss:
-                scaled_loss.backward()
-        else:
-            loss.backward()
-        optimizer.step()
 
-        torch.cuda.synchronize()
-        # measure elapsed time
-        batch_time.update(time.time() - end)
+        if args.prof >= 0: torch.cuda.nvtx.range_push("backward")
+        scaler.scale(loss).backward()
+        if args.prof >= 0: torch.cuda.nvtx.range_pop()
 
-        end = time.time()
+        if args.prof >= 0: torch.cuda.nvtx.range_push("optimizer.step()")
+        scaler.step(optimizer)
+        if args.prof >= 0: torch.cuda.nvtx.range_pop()
+        scaler.update()
 
-        if args.local_rank == 0 and i % args.print_freq == 0 and i > 1:
-            print('Epoch: [{0}][{1}/{2}]\t'
-                  'Time {batch_time.val:.3f} ({batch_time.avg:.3f})\t'
-                  'Speed {3:.3f} ({4:.3f})\t'
-                  'Data {data_time.val:.3f} ({data_time.avg:.3f})\t'
-                  'Loss {loss.val:.4f} ({loss.avg:.4f})\t'
-                  'Prec@1 {top1.val:.3f} ({top1.avg:.3f})\t'
-                  'Prec@5 {top5.val:.3f} ({top5.avg:.3f})'.format(
-                   epoch, i, train_loader_len,
-                   args.total_batch_size / batch_time.val,
-                   args.total_batch_size / batch_time.avg,
-                   batch_time=batch_time,
-                   data_time=data_time, loss=losses, top1=top1, top5=top5))
-        del loss, output
-    return batch_time.avg, losses.avg, top1.avg, top5.avg
+        if i%args.print_freq == 0:
+            # Every print_freq iterations, check the loss, accuracy, and speed.
+            # For best performance, it doesn't make sense to print these metrics every
+            # iteration, since they incur an allreduce and some host<->device syncs.
 
+            # Measure accuracy
+            prec1, prec5 = accuracy(output.data, target, topk=(1, 5))
 
-def validate(val_loader, model, criterion, teacher=None):
+            # Average loss and accuracy across processes for logging
+            if args.distributed:
+                reduced_loss = reduce_tensor(loss.data)
+                prec1 = reduce_tensor(prec1)
+                prec5 = reduce_tensor(prec5)
+            else:
+                reduced_loss = loss.data
+
+            # to_python_float incurs a host<->device sync
+            losses.update(to_python_float(reduced_loss), input.size(0))
+            top1.update(to_python_float(prec1), input.size(0))
+            top5.update(to_python_float(prec5), input.size(0))
+
+            torch.cuda.synchronize()
+            batch_time.update((time.time() - end)/args.print_freq)
+            end = time.time()
+
+            if args.local_rank == 0:
+                print('Epoch: [{0}][{1}/{2}]\t'
+                      'Time {batch_time.val:.3f} ({batch_time.avg:.3f})\t'
+                      'Speed {3:.3f} ({4:.3f})\t'
+                      'Loss {loss.val:.10f} ({loss.avg:.4f})\t'
+                      'Prec@1 {top1.val:.3f} ({top1.avg:.3f})\t'
+                      'Prec@5 {top5.val:.3f} ({top5.avg:.3f})'.format(
+                       epoch, i, train_loader_len,
+                       args.world_size*args.batch_size/batch_time.val,
+                       args.world_size*args.batch_size/batch_time.avg,
+                       batch_time=batch_time,
+                       loss=losses, top1=top1, top5=top5))
+
+        # Pop range "Body of iteration {}".format(i)
+        if args.prof >= 0: torch.cuda.nvtx.range_pop()
+
+        if args.prof >= 0 and i == args.prof + 10:
+            print("Profiling ended at iteration {}".format(i))
+            torch.cuda.cudart().cudaProfilerStop()
+            quit()
+
+    return batch_time.avg
+
+def validate(val_loader, model, criterion):
     batch_time = AverageMeter()
     losses = AverageMeter()
-    losses_kd = AverageMeter()
     top1 = AverageMeter()
     top5 = AverageMeter()
 
@@ -618,48 +537,37 @@ def validate(val_loader, model, criterion, teacher=None):
 
     end = time.time()
 
-    for i, data in enumerate(val_loader):
-        input = data[0]["data"]
-        target = data[0]["label"].squeeze().cuda().long()-1
-        val_loader_len = int(val_loader._size / args.batch_size)
+    if args.disable_dali:
+        data_iterator = data_prefetcher(val_loader)
+        data_iterator = iter(data_iterator)
+    else:
+        data_iterator = val_loader
 
-        target = target.cuda(non_blocking=True)
-        input = Variable(input)
-        target = Variable(target)
+    for i, data in enumerate(data_iterator):
+        if args.disable_dali:
+            input, target = data
+            val_loader_len = len(val_loader)
+        else:
+            input = data[0]["data"]
+            target = data[0]["label"].squeeze(-1).long()
+            val_loader_len = int(math.ceil(data_iterator._size / args.batch_size))
+
         # compute output
         with torch.no_grad():
             output = model(input)
-
-            if args.SKD:
-                output = F.layer_norm(
-                    output, torch.Size((1000,)), None, None, 1e-9) * args.multiplier
             loss = criterion(output, target)
-
-            if args.distillation:
-                output_t = teacher(input)
-                if args.SKD:
-                    output_t = F.layer_norm(
-                        output_t, torch.Size((1000,)), None, None, 1e-9) * args.multiplier
-                loss_kd = nn.KLDivLoss(reduction="batchmean")(F.log_softmax(output / args.T, dim=1),
-                                                              F.softmax(output_t / args.T,
-                                                                        dim=-1)) * args.T * args.T
-
 
         # measure accuracy and record loss
         prec1, prec5 = accuracy(output.data, target, topk=(1, 5))
 
         if args.distributed:
             reduced_loss = reduce_tensor(loss.data)
-            if args.distillation:
-                reduced_loss_kd = reduce_tensor(loss_kd.data)
             prec1 = reduce_tensor(prec1)
             prec5 = reduce_tensor(prec5)
         else:
             reduced_loss = loss.data
 
         losses.update(to_python_float(reduced_loss), input.size(0))
-        if args.distillation:
-            losses_kd.update(to_python_float(reduced_loss_kd), input.size(0))
         top1.update(to_python_float(prec1), input.size(0))
         top5.update(to_python_float(prec5), input.size(0))
 
@@ -667,36 +575,30 @@ def validate(val_loader, model, criterion, teacher=None):
         batch_time.update(time.time() - end)
         end = time.time()
 
+        # TODO:  Change timings to mirror train().
         if args.local_rank == 0 and i % args.print_freq == 0:
             print('Test: [{0}/{1}]\t'
                   'Time {batch_time.val:.3f} ({batch_time.avg:.3f})\t'
                   'Speed {2:.3f} ({3:.3f})\t'
                   'Loss {loss.val:.4f} ({loss.avg:.4f})\t'
-                  'Loss_kd {losses_kd.val:.4f} ({losses_kd.avg:.4f})\t'
                   'Prec@1 {top1.val:.3f} ({top1.avg:.3f})\t'
                   'Prec@5 {top5.val:.3f} ({top5.avg:.3f})'.format(
                    i, val_loader_len,
-                   args.total_batch_size / batch_time.val,
-                   args.total_batch_size / batch_time.avg,
-                   batch_time=batch_time, loss=losses, losses_kd=losses_kd,
+                   args.world_size * args.batch_size / batch_time.val,
+                   args.world_size * args.batch_size / batch_time.avg,
+                   batch_time=batch_time, loss=losses,
                    top1=top1, top5=top5))
 
     print(' * Prec@1 {top1.avg:.3f} Prec@5 {top5.avg:.3f}'
-          .format(top1=top1, top5=top5))
+        .format(top1=top1, top5=top5))
 
-    if args.distillation:
-        loss_kd_avg = losses_kd.avg
-    else:
-        loss_kd_avg = None
-    print("loss_kd:  {}".format(loss_kd_avg))
-    print("loss_softmax:   {}".format(losses.avg))
-    return top1.avg, top5.avg, losses.avg,loss_kd_avg
+    return [top1.avg, top5.avg]
 
 
-def save_checkpoint(state, is_best, filename=os.path.join(args.log_str, 'checkpoint.pth.tar')):
+def save_checkpoint(state, is_best, filename='checkpoint.pth.tar'):
     torch.save(state, filename)
     if is_best:
-        shutil.copyfile(filename, os.path.join(args.log_str, 'model_best.pth.tar'))
+        shutil.copyfile(filename, 'model_best.pth.tar')
 
 
 class AverageMeter(object):
@@ -720,19 +622,15 @@ class AverageMeter(object):
 def adjust_learning_rate(optimizer, epoch, step, len_epoch):
     """LR schedule that should yield 76% converged accuracy with batch size 256"""
     factor = epoch // 30
-    # factor = epoch // 100
+
     if epoch >= 80:
         factor = factor + 1
-    # if epoch >= 90:
-    #     factor = factor + 1
-    lr = args.lr * (0.1 ** factor)
+
+    lr = args.lr*(0.1**factor)
 
     """Warmup"""
-    # if epoch < 5:
-    #     lr = lr * float(1 + step + epoch * len_epoch) / (5. * len_epoch)
-
-    if(args.local_rank == 0 and step % args.print_freq == 0 and step > 1):
-        print("Epoch = {}, step = {}, lr = {}".format(epoch, step, lr))
+    if epoch < 5:
+        lr = lr*float(1 + step + epoch*len_epoch)/(5.*len_epoch)
 
     for param_group in optimizer.param_groups:
         param_group['lr'] = lr
@@ -756,10 +654,9 @@ def accuracy(output, target, topk=(1,)):
 
 def reduce_tensor(tensor):
     rt = tensor.clone()
-    dist.all_reduce(rt, op=dist.reduce_op.SUM)
+    dist.all_reduce(rt, op=dist.ReduceOp.SUM)
     rt /= args.world_size
     return rt
-
 
 if __name__ == '__main__':
     main()
