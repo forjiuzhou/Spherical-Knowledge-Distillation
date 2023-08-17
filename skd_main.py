@@ -347,7 +347,7 @@ def main():
     val_loader = DALIClassificationIterator(pipe, size=int(pipe.epoch_size()['__TFRecordReader_5'] / args.world_size))
 
     if args.evaluate:
-        validate(val_loader, model, criterion, teacher)
+        validate(train_loader, model, criterion, teacher)
         return
     total_time = AverageMeter()
     for epoch in range(args.start_epoch, args.epochs):
