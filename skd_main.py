@@ -275,7 +275,7 @@ def main():
         model = models.__dict__[args.arch]()
     teacher = None
     if args.distillation:
-        teacher = models.resnet50(pretrained=True).cuda()
+        teacher = models.resnet34(pretrained=True).cuda()
         teacher.eval()
 
     model = model.cuda()
