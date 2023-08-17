@@ -463,7 +463,6 @@ def train_kd(train_loader, model, teacher, criterion, optimizer, epoch):
             p_t = F.softmax(output_t/args.T, dim=1)
             loss_kd = torch.sum(torch.sum(F.kl_div(p_s, p_t, reduction='none'), dim=-1) * (args.T* args.T * torch.ones(output.shape[0],1).cuda())) /output.shape[0]/ output.shape[0] * args.alpha
             output = output/stu_std*tea_std
-            print("AAAAAA")
 
         loss_softmax = criterion(output, target_var) * (1-args.alpha)
 
