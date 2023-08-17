@@ -277,12 +277,7 @@ def main():
     if args.distillation:
         teacher = models.resnet50(pretrained=True).cuda()
         teacher.eval()
-
-    from torchvision.models.resnet import resnet18
-    checkpoint = 'https://github.com/forjiuzhou/Spherical-Knowledge-Distillation/releases/download/v1/resnet18_skd.pth'
-    model = resnet18()
-    model.load_state_dict(torch.hub.load_state_dict_from_url(checkpoint, progress=False, map_location="cpu", check_hash=True))
-
+        
     model = model.cuda()
 
     if args.distributed:
