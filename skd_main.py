@@ -97,8 +97,8 @@ class HybridTrainPipe(Pipeline):
         super(HybridTrainPipe, self).__init__(batch_size, num_threads, device_id, seed=12 + device_id)
         # self.input = ops.FileReader(file_root=data_dir, shard_id=args.local_rank, num_shards=args.world_size, random_shuffle=True)
         index_path = []
-        for path in os.listdir("/home/guojia/idx_files/train"):
-            index_path.append(os.path.join("/home/guojia/idx_files/train", path))
+        for path in os.listdir("/home/yz979/code/imagenet/ImageNet-to-TFrecord/idx_files"):
+            index_path.append(os.path.join("/home/yz979/code/imagenet/ImageNet-to-TFrecord/idx_files", path))
         index_path = sorted(index_path)
         self.input = ops.TFRecordReader(path=data_dir, index_path=index_path, shard_id=args.local_rank,
                                         num_shards=args.world_size, random_shuffle=True,
@@ -160,8 +160,8 @@ class HybridValPipe(Pipeline):
         super(HybridValPipe, self).__init__(batch_size, num_threads, device_id, seed=12 + device_id)
         # self.input = ops.FileReader(file_root=data_dir, shard_id=args.local_rank, num_shards=args.world_size, random_shuffle=False)
         index_path = []
-        for path in os.listdir("/home/guojia/idx_files/val"):
-            index_path.append(os.path.join("/home/guojia/idx_files/val", path))
+        for path in os.listdir("/home/yz979/code/imagenet/ImageNet-to-TFrecord/val_idx_files"):
+            index_path.append(os.path.join("/home/yz979/code/imagenet/ImageNet-to-TFrecord/val_idx_files", path))
         index_path = sorted(index_path)
         self.input = ops.TFRecordReader(path=data_dir, index_path=index_path, shard_id=args.local_rank,
                                         num_shards=args.world_size, random_shuffle=True,
@@ -294,7 +294,6 @@ def main():
         model, optimizer = amp.initialize(model, optimizer, opt_level="O1")
         if args.distillation:
             teacher = amp.initialize(teacher, opt_level="O1")
-            teacher_2 = amp.initialize(teacher_2, opt_level="O1")
     print("         C")
     # optionally resume from a checkpoint
     if args.resume:
@@ -365,7 +364,7 @@ def main():
         loss_kd = None
         if args.distillation:
             avg_train_time, losses, top1, top5, loss_kd, \
-                = train_kd(train_loader, model, (teacher,teacher_2), criterion, optimizer, epoch)
+                = train_kd(train_loader, model, (teacher,None), criterion, optimizer, epoch)
         else:
             avg_train_time, losses, top1, top5 = train(train_loader, model, criterion, optimizer, epoch)
         total_time.update(avg_train_time)
@@ -413,7 +412,6 @@ def main():
         del prec5, prec1, losses
         train_loader.reset()
         val_loader.reset()
-
 
 def train_kd(train_loader, model, teacher, criterion, optimizer, epoch):
     batch_time = AverageMeter()
@@ -747,12 +745,6 @@ def accuracy(output, target, topk=(1,)):
         res.append(correct_k.mul_(100.0 / batch_size))
     return res
 
-
-def reduce_tensor(tensor):
-    rt = tensor.clone()
-    dist.all_reduce(rt, op=dist.reduce_op.SUM)
-    rt /= args.world_size
-    return rt
 
 if __name__ == '__main__':
     main()
