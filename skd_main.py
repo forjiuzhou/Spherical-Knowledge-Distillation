@@ -450,16 +450,16 @@ def train_kd(train_loader, model, teacher, criterion, optimizer, epoch):
             output_t = teacher[0](input_var)
 
         if args.SKD:
-            # output = F.layer_norm(
-            #     output, torch.Size((1000,)), None, None, 1e-7)*args.multiplier
-            # output_t = F.layer_norm(
-            #     output_t, torch.Size((1000,)), None, None, 1e-7)*args.multiplier
-            tea_std = torch.std(output_t, dim=-1,keepdim=True)
-            stu_std= torch.std(output, dim=-1, keepdim=True)
-            p_s = F.log_softmax(output/stu_std*tea_std/args.T, dim=1)
-            p_t = F.softmax(output_t/args.T, dim=1)
-            loss_kd = torch.sum(torch.sum(F.kl_div(p_s, p_t, reduction='none'), dim=-1) * (args.T* args.T * torch.ones(output.shape[0],1).cuda())) /output.shape[0]/ output.shape[0] * args.alpha
-            output = output/stu_std*tea_std
+            output = F.layer_norm(
+                output, torch.Size((1000,)), None, None, 1e-7)*args.multiplier
+            output_t = F.layer_norm(
+                output_t, torch.Size((1000,)), None, None, 1e-7)*args.multiplier
+            # tea_std = torch.std(output_t, dim=-1,keepdim=True)
+            # stu_std= torch.std(output, dim=-1, keepdim=True)
+            # p_s = F.log_softmax(output/stu_std*tea_std/args.T, dim=1)
+            # p_t = F.softmax(output_t/args.T, dim=1)
+            # loss_kd = torch.sum(torch.sum(F.kl_div(p_s, p_t, reduction='none'), dim=-1) * (args.T* args.T * torch.ones(output.shape[0],1).cuda())) /output.shape[0]/ output.shape[0] * args.alpha
+            # output = output/stu_std*tea_std
 
         loss_softmax = criterion(output, target_var) * (1-args.alpha)
 
