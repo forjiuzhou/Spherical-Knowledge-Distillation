@@ -146,12 +146,12 @@ class HybridTrainPipe(Pipeline):
 
     def define_graph(self):
         rng = self.coin()
-        self.jpegs, self.labels = self.input(name="Reader")
+        self.jpegs, self.labels = self.input()
 
         # inputs = self.input()
         # self.jpegs = inputs["image/encoded"]
         # self.labels = inputs["image/class/label"]
-        
+
         images = self.decode(self.jpegs)
         images = self.res(images)
         output = self.cmnp(images.gpu(), mirror=rng)
@@ -190,7 +190,7 @@ class HybridValPipe(Pipeline):
                                             std=[0.229 * 255,0.224 * 255,0.225 * 255])
 
     def define_graph(self):
-        self.jpegs, self.labels = self.input(name="Reader")
+        self.jpegs, self.labels = self.input()
 
         # inputs = self.input()
         # self.jpegs = inputs["image/encoded"]
