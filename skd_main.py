@@ -316,8 +316,8 @@ def main():
         for path in os.listdir(os.path.join(args.data[0], "train")):
             traindir.append(os.path.join(args.data[0],"train", path))
         traindir = sorted(traindir)
-        for path in os.listdir(os.path.join(args.data[0], "validation")):
-            valdir.append(os.path.join(args.data[0], "validation",path))
+        for path in os.listdir(os.path.join(args.data[0], "val")):
+            valdir.append(os.path.join(args.data[0], "val",path))
         valdir = sorted(valdir)
         print(len(valdir), len(traindir))
     else:
