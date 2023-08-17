@@ -95,30 +95,31 @@ cudnn.benchmark = True
 class HybridTrainPipe(Pipeline):
     def __init__(self, batch_size, num_threads, device_id, data_dir, crop, dali_cpu=False):
         super(HybridTrainPipe, self).__init__(batch_size, num_threads, device_id, seed=12 + device_id)
-        # self.input = ops.FileReader(file_root=data_dir, shard_id=args.local_rank, num_shards=args.world_size, random_shuffle=True)
-        index_path = []
-        for path in os.listdir("/home/yz979/code/imagenet/ImageNet-to-TFrecord/idx_files"):
-            index_path.append(os.path.join("/home/yz979/code/imagenet/ImageNet-to-TFrecord/idx_files", path))
-        index_path = sorted(index_path)
-        self.input = ops.TFRecordReader(path=data_dir, index_path=index_path, shard_id=args.local_rank,
-                                        num_shards=args.world_size, random_shuffle=True,
-                                        features={
-                                                    'image/height': tfrec.FixedLenFeature([1], tfrec.int64,  -1),
-                                                    'image/width': tfrec.FixedLenFeature([1], tfrec.int64,  -1),
-                                                    'image/colorspace': tfrec.FixedLenFeature([ ], tfrec.string, ''),
-                                                    'image/channels': tfrec.FixedLenFeature([], tfrec.int64,  -1),
-                                                    'image/class/label': tfrec.FixedLenFeature([1], tfrec.int64,  -1),
-                                                    'image/class/synset': tfrec.FixedLenFeature([ ], tfrec.string, ''),
-                                                    # 'image/class/text': tfrec.FixedLenFeature([ ], tfrec.string, ''),
-                                                    # 'image/object/bbox/xmin': tfrec.VarLenFeature(tfrec.float32, 0.0),
-                                                    # 'image/object/bbox/xmax': tfrec.VarLenFeature(tfrec.float32, 0.0),
-                                                    # 'image/object/bbox/ymin': tfrec.VarLenFeature(tfrec.float32, 0.0),
-                                                    # 'image/object/bbox/ymax': tfrec.VarLenFeature(tfrec.float32, 0.0),
-                                                    # 'image/object/bbox/label': tfrec.FixedLenFeature([1], tfrec.int64,-1),
-                                                    'image/format': tfrec.FixedLenFeature((), tfrec.string, ""),
-                                                    'image/filename': tfrec.FixedLenFeature((), tfrec.string, ""),
-                                                    'image/encoded': tfrec.FixedLenFeature((), tfrec.string, "")
-                                                })
+        self.input = ops.FileReader(file_root=data_dir, shard_id=args.local_rank, num_shards=args.world_size, random_shuffle=True)
+        # index_path = []
+        # for path in os.listdir("/home/yz979/code/imagenet/ImageNet-to-TFrecord/idx_files"):
+        #     index_path.append(os.path.join("/home/yz979/code/imagenet/ImageNet-to-TFrecord/idx_files", path))
+        # index_path = sorted(index_path)
+        
+        # self.input = ops.TFRecordReader(path=data_dir, index_path=index_path, shard_id=args.local_rank,
+        #                                 num_shards=args.world_size, random_shuffle=True,
+        #                                 features={
+        #                                             'image/height': tfrec.FixedLenFeature([1], tfrec.int64,  -1),
+        #                                             'image/width': tfrec.FixedLenFeature([1], tfrec.int64,  -1),
+        #                                             'image/colorspace': tfrec.FixedLenFeature([ ], tfrec.string, ''),
+        #                                             'image/channels': tfrec.FixedLenFeature([], tfrec.int64,  -1),
+        #                                             'image/class/label': tfrec.FixedLenFeature([1], tfrec.int64,  -1),
+        #                                             'image/class/synset': tfrec.FixedLenFeature([ ], tfrec.string, ''),
+        #                                             # 'image/class/text': tfrec.FixedLenFeature([ ], tfrec.string, ''),
+        #                                             # 'image/object/bbox/xmin': tfrec.VarLenFeature(tfrec.float32, 0.0),
+        #                                             # 'image/object/bbox/xmax': tfrec.VarLenFeature(tfrec.float32, 0.0),
+        #                                             # 'image/object/bbox/ymin': tfrec.VarLenFeature(tfrec.float32, 0.0),
+        #                                             # 'image/object/bbox/ymax': tfrec.VarLenFeature(tfrec.float32, 0.0),
+        #                                             # 'image/object/bbox/label': tfrec.FixedLenFeature([1], tfrec.int64,-1),
+        #                                             'image/format': tfrec.FixedLenFeature((), tfrec.string, ""),
+        #                                             'image/filename': tfrec.FixedLenFeature((), tfrec.string, ""),
+        #                                             'image/encoded': tfrec.FixedLenFeature((), tfrec.string, "")
+        #                                         })
 
         #let user decide which pipeline works him bets for RN version he runs
         dali_device = 'cpu' if dali_cpu else 'gpu'
@@ -158,24 +159,24 @@ class HybridTrainPipe(Pipeline):
 class HybridValPipe(Pipeline):
     def __init__(self, batch_size, num_threads, device_id, data_dir, crop, size):
         super(HybridValPipe, self).__init__(batch_size, num_threads, device_id, seed=12 + device_id)
-        # self.input = ops.FileReader(file_root=data_dir, shard_id=args.local_rank, num_shards=args.world_size, random_shuffle=False)
-        index_path = []
-        for path in os.listdir("/home/yz979/code/imagenet/ImageNet-to-TFrecord/val_idx_files"):
-            index_path.append(os.path.join("/home/yz979/code/imagenet/ImageNet-to-TFrecord/val_idx_files", path))
-        index_path = sorted(index_path)
-        self.input = ops.TFRecordReader(path=data_dir, index_path=index_path, shard_id=args.local_rank,
-                                        num_shards=args.world_size, random_shuffle=True,
-                                        features={
-                                            'image/height': tfrec.FixedLenFeature([1], tfrec.int64, -1),
-                                            'image/width': tfrec.FixedLenFeature([1], tfrec.int64, -1),
-                                            'image/colorspace': tfrec.FixedLenFeature([], tfrec.string, ''),
-                                            'image/channels': tfrec.FixedLenFeature([], tfrec.int64, -1),
-                                            'image/class/label': tfrec.FixedLenFeature([1], tfrec.int64, -1),
-                                            'image/class/synset': tfrec.FixedLenFeature([], tfrec.string, ''),
-                                            'image/format': tfrec.FixedLenFeature((), tfrec.string, ""),
-                                            'image/filename': tfrec.FixedLenFeature((), tfrec.string, ""),
-                                            'image/encoded': tfrec.FixedLenFeature((), tfrec.string, "")
-                                        })
+        self.input = ops.FileReader(file_root=data_dir, shard_id=args.local_rank, num_shards=args.world_size, random_shuffle=False)
+        # index_path = []
+        # for path in os.listdir("/home/yz979/code/imagenet/ImageNet-to-TFrecord/val_idx_files"):
+        #     index_path.append(os.path.join("/home/yz979/code/imagenet/ImageNet-to-TFrecord/val_idx_files", path))
+        # index_path = sorted(index_path)
+        # self.input = ops.TFRecordReader(path=data_dir, index_path=index_path, shard_id=args.local_rank,
+        #                                 num_shards=args.world_size, random_shuffle=True,
+        #                                 features={
+        #                                     'image/height': tfrec.FixedLenFeature([1], tfrec.int64, -1),
+        #                                     'image/width': tfrec.FixedLenFeature([1], tfrec.int64, -1),
+        #                                     'image/colorspace': tfrec.FixedLenFeature([], tfrec.string, ''),
+        #                                     'image/channels': tfrec.FixedLenFeature([], tfrec.int64, -1),
+        #                                     'image/class/label': tfrec.FixedLenFeature([1], tfrec.int64, -1),
+        #                                     'image/class/synset': tfrec.FixedLenFeature([], tfrec.string, ''),
+        #                                     'image/format': tfrec.FixedLenFeature((), tfrec.string, ""),
+        #                                     'image/filename': tfrec.FixedLenFeature((), tfrec.string, ""),
+        #                                     'image/encoded': tfrec.FixedLenFeature((), tfrec.string, "")
+        #                                 })
         self.decode = ops.ImageDecoder(device="mixed", output_type=types.RGB)
         self.res = ops.Resize(device="gpu", resize_shorter=size, interp_type=types.INTERP_TRIANGULAR)
         self.cmnp = ops.CropMirrorNormalize(device="gpu",
@@ -751,6 +752,7 @@ def accuracy(output, target, topk=(1,)):
         correct_k = correct[:k].reshape(-1).float().sum(0, keepdim=True)
         res.append(correct_k.mul_(100.0 / batch_size))
     return res
+
 
 def reduce_tensor(tensor):
     rt = tensor.clone()
