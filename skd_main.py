@@ -222,7 +222,7 @@ if not len(args.data):
 
 args.distributed = False
 if 'WORLD_SIZE' in os.environ:
-    args.distributed = int(os.environ['WORLD_SIZE']) > 1
+    args.distributed = int(os.environ['WORLD_SIZE']) >= 1
 
 # make apex optional
 if args.fp16 or args.distributed:
