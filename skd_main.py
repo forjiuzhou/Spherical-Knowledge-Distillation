@@ -278,11 +278,6 @@ def main():
         teacher = models.resnet50(pretrained=True).cuda()
         teacher.eval()
 
-    from torchvision.models.resnet import resnet18
-    checkpoint = 'https://github.com/forjiuzhou/Spherical-Knowledge-Distillation/releases/download/v1/resnet18_skd.pth'
-    model = resnet18()
-    model.load_state_dict(torch.hub.load_state_dict_from_url(checkpoint, progress=False, map_location="cpu", check_hash=True))
-
     model = model.cuda()
 
     if args.distributed:
@@ -370,7 +365,7 @@ def main():
         loss_kd = None
         if args.distillation:
             avg_train_time, losses, top1, top5, loss_kd, \
-                = train_kd(train_loader, model, (teacher,None), criterion, optimizer, epoch)
+                = train_kd(train_loader, model, teacher, criterion, optimizer, epoch)
         else:
             avg_train_time, losses, top1, top5 = train(train_loader, model, criterion, optimizer, epoch)
         total_time.update(avg_train_time)
@@ -452,7 +447,7 @@ def train_kd(train_loader, model, teacher, criterion, optimizer, epoch):
         # compute output
         output = model(input_var)
         with torch.no_grad():
-            output_t = teacher[0](input_var)
+            output_t = teacher(input_var)
 
         if args.SKD:
             # output = F.layer_norm(
