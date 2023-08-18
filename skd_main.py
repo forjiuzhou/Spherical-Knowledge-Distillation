@@ -577,7 +577,7 @@ def train(train_loader, model, teacher, criterion, scaler, optimizer, epoch):
             train_loader_len = len(train_loader)
         else:
             input = data[0]["data"]
-            target = data[0]["label"].squeeze(-1).long()
+            target = data[0]["label"].squeeze(-1).long().cuda()
             train_loader_len = int(math.ceil(data_iterator._size / args.batch_size))
 
         if args.prof >= 0 and i == args.prof:
