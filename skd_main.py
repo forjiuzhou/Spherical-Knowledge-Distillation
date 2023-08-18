@@ -63,7 +63,7 @@ def parse():
                         ' (default: resnet18)')
     parser.add_argument('-j', '--workers', default=4, type=int, metavar='N',
                         help='number of data loading workers (default: 4)')
-    parser.add_argument('--epochs', default=90, type=int, metavar='N',
+    parser.add_argument('--epochs', default=100, type=int, metavar='N',
                         help='number of total epochs to run')
     parser.add_argument('--start-epoch', default=0, type=int, metavar='N',
                         help='manual epoch number (useful on restarts)')
@@ -362,7 +362,7 @@ def main():
     total_time = AverageMeter()
     for epoch in range(args.start_epoch, args.epochs):
         # train for one epoch
-        avg_train_time = train(train_loader, model, criterion, scaler, optimizer, epoch)
+        avg_train_time = train(train_loader, model,teacher, criterion, scaler, optimizer, epoch)
         total_time.update(avg_train_time)
         if args.test:
             break
