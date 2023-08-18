@@ -136,8 +136,8 @@ def tfrecord_pipeline(
     tf_files = sorted(os.listdir(tfrecord_path))
     idx_files = sorted(os.listdir(tfrecord_idx_path))
 
-    tfrec_path_list = [os.join(tfrecord_path, x) for x in tf_files]
-    idx_path_list = [os.join(tfrecord_idx_path, x) for x in idx_files]
+    tfrec_path_list = [os.path.join(tfrecord_path, x) for x in tf_files]
+    idx_path_list = [os.path.join(tfrecord_idx_path, x) for x in idx_files]
 
     inputs = fn.readers.tfrecord(  # type: ignore
         path=tfrec_path_list,
