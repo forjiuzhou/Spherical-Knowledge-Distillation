@@ -694,7 +694,7 @@ def validate(val_loader, model, criterion):
             val_loader_len = len(val_loader)
         else:
             input = data[0]["data"]
-            target = data[0]["label"].squeeze(-1).long()
+            target = data[0]["label"].squeeze(-1).long().cuda()
             val_loader_len = int(math.ceil(data_iterator._size / args.batch_size))
 
         # compute output
