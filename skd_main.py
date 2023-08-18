@@ -18,11 +18,13 @@ import numpy as np
 
 from torch.nn.parallel import DistributedDataParallel as DDP
 
+
 try:
     from nvidia.dali.plugin.pytorch import DALIClassificationIterator, LastBatchPolicy
     from nvidia.dali.pipeline import pipeline_def
     import nvidia.dali.types as types
     import nvidia.dali.fn as fn
+    import nvidia.dali.tfrecord as tfrec
 except ImportError:
     raise ImportError("Please install DALI from https://www.github.com/NVIDIA/DALI to run this example.")
 import torchvision.transforms as transforms
