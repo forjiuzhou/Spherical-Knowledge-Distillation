@@ -598,8 +598,6 @@ def train(train_loader, model, teacher, criterion, scaler, optimizer, epoch):
             stu_std= torch.std(output, dim=-1, keepdim=True)
             output = output/stu_std*tea_std
 
-            print("AAAAAAA", output.get_device(), target.get_device())
-
             loss = criterion(output, target) * (1-args.alpha)
             
             p_s = F.log_softmax(output/stu_std*tea_std/args.T, dim=1)
