@@ -133,9 +133,15 @@ def tfrecord_pipeline(
     device_memory_padding = 211025920 if decoder_device == "mixed" else 0
     host_memory_padding = 140544512 if decoder_device == "mixed" else 0
 
+    tf_files = sorted(os.listdir(tfrecord_path))
+    idx_files = sorted(os.listdir(tfrecord_idx_path))
+
+    tfrec_path_list = [os.join(tfrecord_path, x) for x in tf_files]
+    idx_path_list = [os.join(tfrecord_idx_path, x) for x in idx_files]
+
     inputs = fn.readers.tfrecord(  # type: ignore
-        path=tfrecord_path,
-        index_path=tfrecord_idx_path,
+        path=tfrec_path_list,
+        index_path=idx_path_list,
         features={
             "image/encoded": tfrec.FixedLenFeature((), tfrec.string, ""),  # type: ignore
             "image/class/label": tfrec.FixedLenFeature([1], tfrec.int64, -1),  # type: ignore
