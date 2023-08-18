@@ -113,6 +113,91 @@ def to_python_float(t):
 
 
 @pipeline_def
+def tfrecord_pipeline(
+    tfrecord_path,
+    tfrecord_idx_path,
+    num_shards,
+    is_training,
+    shard_id,
+    dali_cpu=False,
+    crop=224,
+    size=256,
+):
+    # Specify devices to use.
+    dali_device = "cpu" if dali_cpu else "gpu"
+    decoder_device = "cpu" if dali_cpu else "mixed"
+    # This padding sets the size of the internal nvJPEG buffers to be able to
+    # handle all images from full-sized ImageNet without additional reallocations.
+    device_memory_padding = 211025920 if decoder_device == "mixed" else 0
+    host_memory_padding = 140544512 if decoder_device == "mixed" else 0
+
+    inputs = fn.readers.tfrecord(  # type: ignore
+        path=tfrecord_path,
+        index_path=tfrecord_idx_path,
+        features={
+            "image/encoded": tfrec.FixedLenFeature((), tfrec.string, ""),  # type: ignore
+            "image/class/label": tfrec.FixedLenFeature([1], tfrec.int64, -1),  # type: ignore
+        },
+        num_shards=num_shards,
+        shard_id=shard_id,
+        name="Reader",
+    )
+
+    # Decoder and data augmentation
+    if is_training:
+        images = fn.decoders.image_random_crop(  # type: ignore
+            inputs["image/encoded"],
+            device=decoder_device,
+            output_type=types.RGB,  # type: ignore
+            device_memory_padding=device_memory_padding,
+            host_memory_padding=host_memory_padding,
+            random_aspect_ratio=[0.8, 1.25],
+            random_area=[0.1, 1.0],
+            num_attempts=100,
+        )
+        images = fn.resize(  # type: ignore
+            images,
+            device=dali_device,
+            resize_x=crop,
+            resize_y=crop,
+            interp_type=types.INTERP_TRIANGULAR,  # type: ignore
+        )
+        rng = fn.random.coin_flip()  # type: ignore
+    else:
+        images = fn.decoders.image(  # type: ignore
+            inputs["image/encoded"],
+            device=decoder_device,
+            output_type=types.RGB,  # type: ignore
+            device_memory_padding=device_memory_padding,
+            host_memory_padding=host_memory_padding,
+        )
+        images = fn.resize(  # type: ignore
+            images,
+            device=dali_device,
+            resize_shorter=size,
+            interp_type=types.INTERP_TRIANGULAR,  # type: ignore
+        )
+        rng = False
+
+    # Normalize such that values are in the range [0, 1].
+    mean = [0.485 * 255, 0.456 * 255, 0.406 * 255]
+    std = [0.229 * 255, 0.224 * 255, 0.225 * 255]
+
+    images = fn.crop_mirror_normalize(  # type: ignore
+        images.gpu(),
+        dtype=types.FLOAT,  # type: ignore
+        output_layout=types.NCHW,  # type: ignore
+        crop=(crop, crop),
+        mean=mean,
+        std=std,
+        mirror=rng,
+    )
+
+    labels = inputs["image/class/label"] - 1
+
+    return images, labels
+
+@pipeline_def
 def create_dali_pipeline(data_dir, crop, size, shard_id, num_shards, dali_cpu=False, is_training=True):
     images, labels = fn.readers.file(file_root=data_dir,
                                      shard_id=shard_id,
@@ -276,6 +361,12 @@ def main():
         traindir = args.data[0]
         valdir= args.data[1]
 
+        tfrecord_path=args.data[0]
+        tfrecord_idx_path=args.data[1]
+        tfrecord_path_val=args.data[2]
+        tfrecord_idx_path_val=args.data[3]
+        
+
     if args.arch == "inception_v3":
         raise RuntimeError("Currently, inception_v3 is not supported by this example.")
         # crop_size = 299
@@ -287,33 +378,58 @@ def main():
     train_loader = None
     val_loader = None
     if not args.disable_dali:
-        train_pipe = create_dali_pipeline(batch_size=args.batch_size,
-                                          num_threads=args.workers,
-                                          device_id=args.local_rank,
-                                          seed=12 + args.local_rank,
-                                          data_dir=traindir,
-                                          crop=crop_size,
-                                          size=val_size,
-                                          dali_cpu=args.dali_cpu,
-                                          shard_id=args.local_rank,
-                                          num_shards=args.world_size,
-                                          is_training=True)
+        # train_pipe = create_dali_pipeline(batch_size=args.batch_size,
+        #                                   num_threads=args.workers,
+        #                                   device_id=args.local_rank,
+        #                                   seed=12 + args.local_rank,
+        #                                   data_dir=traindir,
+        #                                   crop=crop_size,
+        #                                   size=val_size,
+        #                                   dali_cpu=args.dali_cpu,
+        #                                   shard_id=args.local_rank,
+        #                                   num_shards=args.world_size,
+        #                                   is_training=True)
+        train_pipe = tfrecord_pipeline(batch_size=args.batch_size,
+                                    num_threads=args.workers,
+                                    device_id=args.local_rank,
+                                    seed=12 + args.local_rank,
+                                    tfrecord_path=tfrecord_path,
+                                    tfrecord_idx_path=tfrecord_idx_path,
+                                    crop=crop_size,
+                                    size=val_size,
+                                    dali_cpu=args.dali_cpu,
+                                    shard_id=args.local_rank,
+                                    num_shards=args.world_size,
+                                    is_training=True)
         train_pipe.build()
         train_loader = DALIClassificationIterator(train_pipe, reader_name="Reader",
                                                   last_batch_policy=LastBatchPolicy.PARTIAL,
                                                   auto_reset=True)
+        
+        val_pipe = tfrecord_pipeline(batch_size=args.batch_size,
+                                num_threads=args.workers,
+                                device_id=args.local_rank,
+                                seed=12 + args.local_rank,
+                                tfrecord_path=tfrecord_path_val,
+                                tfrecord_idx_path=tfrecord_idx_path_val,
+                                crop=crop_size,
+                                size=val_size,
+                                dali_cpu=args.dali_cpu,
+                                shard_id=args.local_rank,
+                                num_shards=args.world_size,
+                                is_training=False)
 
-        val_pipe = create_dali_pipeline(batch_size=args.batch_size,
-                                        num_threads=args.workers,
-                                        device_id=args.local_rank,
-                                        seed=12 + args.local_rank,
-                                        data_dir=valdir,
-                                        crop=crop_size,
-                                        size=val_size,
-                                        dali_cpu=args.dali_cpu,
-                                        shard_id=args.local_rank,
-                                        num_shards=args.world_size,
-                                        is_training=False)
+        # val_pipe = create_dali_pipeline(batch_size=args.batch_size,
+        #                                 num_threads=args.workers,
+        #                                 device_id=args.local_rank,
+        #                                 seed=12 + args.local_rank,
+        #                                 data_dir=valdir,
+        #                                 crop=crop_size,
+        #                                 size=val_size,
+        #                                 dali_cpu=args.dali_cpu,
+        #                                 shard_id=args.local_rank,
+        #                                 num_shards=args.world_size,
+                                        # is_training=False)
         val_pipe.build()
         val_loader = DALIClassificationIterator(val_pipe, reader_name="Reader",
                                                 last_batch_policy=LastBatchPolicy.PARTIAL,
