@@ -469,16 +469,17 @@ def train(train_loader, model, teacher, criterion, scaler, optimizer, epoch):
 
         with torch.cuda.amp.autocast(enabled=args.fp16_mode):
             output = model(input)
-            loss = criterion(output, target) * (1-args.alpha)
-
             output_t = teacher(input)
             tea_std = torch.std(output_t, dim=-1,keepdim=True)
             stu_std= torch.std(output, dim=-1, keepdim=True)
+            output = output/stu_std*tea_std
+
+            loss = criterion(output, target) * (1-args.alpha)
+            
             p_s = F.log_softmax(output/stu_std*tea_std/args.T, dim=1)
             p_t = F.softmax(output_t/args.T, dim=1)
             loss_kd = torch.sum(torch.sum(F.kl_div(p_s, p_t, reduction='none'), dim=-1) * (args.T* args.T * torch.ones(output.shape[0],1).cuda())) /output.shape[0]/ output.shape[0] * args.alpha
-            output = output/stu_std*tea_std
-
+            
             loss += loss_kd
 
         # compute output
