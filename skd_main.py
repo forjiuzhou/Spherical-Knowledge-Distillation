@@ -12,6 +12,7 @@ import torch.distributed as dist
 import torch.optim
 import torch.utils.data
 import torch.utils.data.distributed
+import torch.nn.functional as F
 
 import numpy as np
 
@@ -97,6 +98,9 @@ def parse():
     parser.add_argument('--channels-last', type=bool, default=False)
     parser.add_argument('-t', '--test', action='store_true',
                         help='Launch test mode with preset arguments')
+
+    parser.add_argument('--T', type=float)
+    parser.add_argument('--alpha', type=float)
     args = parser.parse_args()
     return args
 
@@ -224,6 +228,11 @@ def main():
     else:
         model = model.cuda()
 
+    
+    teacher = models.resnet34(pretrained=True).cuda()
+    teacher.eval()
+
+
     # Scale learning rate based on global batch size
     args.lr = args.lr*float(args.batch_size*args.world_size)/256.
     optimizer = torch.optim.SGD(model.parameters(), args.lr,
@@ -235,6 +244,7 @@ def main():
         s.wait_stream(torch.cuda.current_stream())
         with torch.cuda.stream(s):
             model = DDP(model, device_ids=[args.local_rank], output_device=args.local_rank)
+            teacher = DDP(teacher, device_ids=[args.local_rank], output_device=args.local_rank)
         torch.cuda.current_stream().wait_stream(s)
 
     # define loss function (criterion) and optimizer
@@ -421,7 +431,7 @@ class data_prefetcher():
             raise StopIteration
         return input, target
 
-def train(train_loader, model, criterion, scaler, optimizer, epoch):
+def train(train_loader, model, teacher, criterion, scaler, optimizer, epoch):
     batch_time = AverageMeter()
     losses = AverageMeter()
     top1 = AverageMeter()
@@ -459,7 +469,17 @@ def train(train_loader, model, criterion, scaler, optimizer, epoch):
 
         with torch.cuda.amp.autocast(enabled=args.fp16_mode):
             output = model(input)
-            loss = criterion(output, target)
+            loss = criterion(output, target) * (1-args.alpha)
+
+            output_t = teacher(input)
+            tea_std = torch.std(output_t, dim=-1,keepdim=True)
+            stu_std= torch.std(output, dim=-1, keepdim=True)
+            p_s = F.log_softmax(output/stu_std*tea_std/args.T, dim=1)
+            p_t = F.softmax(output_t/args.T, dim=1)
+            loss_kd = torch.sum(torch.sum(F.kl_div(p_s, p_t, reduction='none'), dim=-1) * (args.T* args.T * torch.ones(output.shape[0],1).cuda())) /output.shape[0]/ output.shape[0] * args.alpha
+            output = output/stu_std*tea_std
+
+            loss += loss_kd
 
         # compute output
         if args.prof >= 0: torch.cuda.nvtx.range_push("forward")
